@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Qwen3 Reranker Server - Transformers 기반
+"""BGE Reranker Server - CrossEncoder 기반
 
 vLLM Score API 호환 엔드포인트 제공:
 - POST /v1/score - 단일 쿼리-문서 점수
 - POST /v1/rerank - 배치 재순위화
 
-Qwen3-Reranker의 공식 구현 방식 사용:
-- "yes"/"no" 토큰의 logits로 점수 계산
-- log_softmax → "yes" 확률 = 관련성 점수
+CrossEncoder 방식:
+- Instruction 불필요
+- 쿼리-문서 쌍을 직접 점수화
+- 다국어 지원 (bge-reranker-v2-m3)
 
 Apple Silicon (MPS) 및 CPU 지원
 """
@@ -20,7 +21,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from sentence_transformers import CrossEncoder
 
 # MPS fallback for Apple Silicon
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -31,20 +32,13 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Configuration
 # =============================================================================
-MODEL_NAME = os.getenv("RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B")
+MODEL_NAME = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 DEVICE = os.getenv("RERANK_DEVICE", "auto")  # auto, cpu, mps, cuda
 MAX_LENGTH = int(os.getenv("RERANK_MAX_LENGTH", "512"))
 PORT = int(os.getenv("RERANK_PORT", "9046"))
-DEFAULT_INSTRUCTION = os.getenv(
-    "RERANK_INSTRUCTION",
-    "OMP 명령어 검색 쿼리가 주어지면, 가장 관련 있는 명령어를 찾아주세요"
-)
 
-# Global model instances
-model = None
-tokenizer = None
-token_true_id = None
-token_false_id = None
+# Global model instance
+model: Optional[CrossEncoder] = None
 
 
 # =============================================================================
@@ -52,10 +46,10 @@ token_false_id = None
 # =============================================================================
 class ScoreRequest(BaseModel):
     """vLLM Score API 호환 요청"""
-    model: str = Field(default="qwen3-reranker")
+    model: str = Field(default="bge-reranker")
     text_1: str = Field(..., description="Query text")
     text_2: str = Field(..., description="Document text")
-    instruction: Optional[str] = None
+    instruction: Optional[str] = None  # 무시됨 (호환성 유지)
 
 
 class ScoreResponse(BaseModel):
@@ -73,10 +67,10 @@ class RerankDocument(BaseModel):
 
 class RerankRequest(BaseModel):
     """배치 재순위화 요청"""
-    model: str = Field(default="qwen3-reranker")
+    model: str = Field(default="bge-reranker")
     query: str
     documents: List[Union[str, RerankDocument]]
-    instruction: Optional[str] = None
+    instruction: Optional[str] = None  # 무시됨 (호환성 유지)
     top_k: Optional[int] = None
     return_documents: bool = True
 
@@ -125,112 +119,51 @@ def get_device() -> str:
 
 
 def load_model():
-    """Qwen3-Reranker 모델 로드"""
-    global model, tokenizer, token_true_id, token_false_id
+    """BGE Reranker 모델 로드"""
+    global model
 
     device = get_device()
     logger.info(f"Loading model: {MODEL_NAME} on device: {device}")
 
     try:
-        # Tokenizer 로드 (padding_side='left' 필수)
-        tokenizer = AutoTokenizer.from_pretrained(
+        # CrossEncoder 로드
+        model = CrossEncoder(
             MODEL_NAME,
-            padding_side='left',
+            max_length=MAX_LENGTH,
+            device=device,
             trust_remote_code=True,
         )
 
-        # 모델 로드
-        if device == "cuda":
-            model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                torch_dtype=torch.float16,
-                device_map="auto",
-                trust_remote_code=True,
-            )
-        elif device == "mps":
-            model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                torch_dtype=torch.float32,  # MPS는 float16 제한 있음
-                trust_remote_code=True,
-            ).to(device)
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-            )
-
-        model.eval()
-
-        # "yes"/"no" 토큰 ID 저장
-        token_true_id = tokenizer.convert_tokens_to_ids("yes")
-        token_false_id = tokenizer.convert_tokens_to_ids("no")
-
-        logger.info(f"Model loaded successfully")
-        logger.info(f"Token IDs - yes: {token_true_id}, no: {token_false_id}")
+        logger.info(f"Model loaded successfully on {device}")
 
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         raise
 
 
-def format_instruction(query: str, document: str, instruction: Optional[str] = None) -> str:
-    """Qwen3 Reranker 입력 포맷"""
-    inst = instruction or DEFAULT_INSTRUCTION
-    return f"<Instruct>: {inst}\n<Query>: {query}\n<Document>: {document}"
-
-
-@torch.no_grad()
-def compute_scores(pairs: List[tuple], instruction: Optional[str] = None) -> List[float]:
+def compute_scores(pairs: List[tuple]) -> List[float]:
     """배치 점수 계산
 
     Args:
         pairs: [(query, document), ...] 리스트
-        instruction: 커스텀 instruction (optional)
 
     Returns:
-        [score, ...] 0-1 범위의 관련성 점수
+        [score, ...] 관련성 점수 (sigmoid 적용된 0-1 범위)
     """
     if not pairs:
         return []
 
-    scores = []
-    device = next(model.parameters()).device
+    # CrossEncoder.predict()는 배치 처리 지원
+    scores = model.predict(pairs, convert_to_numpy=True)
 
-    # 개별 처리 (배치 패딩 문제 회피)
-    for query, document in pairs:
-        text = format_instruction(query, document, instruction)
+    # numpy array를 list로 변환, sigmoid 적용하여 0-1 범위로
+    result = []
+    for score in scores:
+        # BGE reranker는 logit 값 반환, sigmoid로 확률 변환
+        prob = 1 / (1 + pow(2.718281828, -float(score)))
+        result.append(prob)
 
-        # 토크나이징
-        inputs = tokenizer(
-            text,
-            truncation=True,
-            max_length=MAX_LENGTH,
-            return_tensors="pt",
-        )
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        # 모델 추론
-        outputs = model(**inputs)
-
-        # 마지막 토큰의 logits에서 yes/no 점수 추출
-        logits = outputs.logits[0, -1, :]
-        true_logit = logits[token_true_id]
-        false_logit = logits[token_false_id]
-
-        # softmax로 확률 계산
-        stacked = torch.stack([false_logit, true_logit])
-        probs = torch.nn.functional.softmax(stacked, dim=0)
-
-        # "yes" 확률 = 관련성 점수
-        score = probs[1].cpu().item()
-
-        # NaN 체크
-        if score != score:  # NaN check
-            score = 0.0
-
-        scores.append(score)
-
-    return scores
+    return result
 
 
 # =============================================================================
@@ -246,8 +179,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Zeta Rerank Server",
-    description="Qwen3 Reranker using Transformers - vLLM Score API Compatible",
-    version="0.1.0",
+    description="BGE Reranker using CrossEncoder - vLLM Score API Compatible",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -278,7 +211,7 @@ async def list_models():
     """사용 가능한 모델 목록"""
     return ModelsResponse(
         data=[
-            ModelInfo(id="qwen3-reranker"),
+            ModelInfo(id="bge-reranker"),
             ModelInfo(id=MODEL_NAME),
         ]
     )
@@ -291,10 +224,7 @@ async def compute_score_endpoint(request: ScoreRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
-        scores = compute_scores(
-            [(request.text_1, request.text_2)],
-            instruction=request.instruction,
-        )
+        scores = compute_scores([(request.text_1, request.text_2)])
 
         return ScoreResponse(
             model=request.model,
@@ -324,7 +254,7 @@ async def rerank_documents(request: RerankRequest):
         pairs = [(request.query, doc.text) for doc in documents]
 
         # 배치 점수 계산
-        scores = compute_scores(pairs, instruction=request.instruction)
+        scores = compute_scores(pairs)
 
         # 결과 생성
         results = []

@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "zeta-rerank"
 version = "0.1.0"
-description = "Qwen3 Reranker Server using Sentence Transformers"
+description = "BGE Reranker Server using CrossEncoder"
 authors = ["Zeta"]
 readme = "README.md"
 
