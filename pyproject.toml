@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "zeta-rerank"
+version = "0.1.0"
+description = "Qwen3 Reranker Server using Sentence Transformers"
+authors = ["Zeta"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.32.0"}
+sentence-transformers = "^4.0.0"
+torch = "^2.5.0"
+transformers = "^4.47.0"
+pydantic = "^2.10.0"
+
+[tool.poetry.scripts]
+zeta-rerank = "server:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
