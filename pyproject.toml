@@ -2,8 +2,11 @@
 name = "zeta-rerank"
 version = "0.1.0"
 description = "BGE Reranker Server using CrossEncoder"
-authors = ["Zeta"]
+authors = ["Zeta4Lab <zeta4lab@users.noreply.github.com>"]
+license = "Apache-2.0"
 readme = "README.md"
+homepage = "https://github.com/zeta4lab/zeta-rerank"
+repository = "https://github.com/zeta4lab/zeta-rerank"
 
 [tool.poetry.dependencies]
 python = "^3.10"

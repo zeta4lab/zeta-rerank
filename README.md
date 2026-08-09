@@ -67,3 +67,14 @@ docker-compose up -d
 - `RERANK_DEVICE`: `auto`, `cpu`, `mps`, `cuda` (default: `auto`)
 - `RERANK_PORT`: 서버 포트 (default: `9046`)
 - `RERANK_MAX_LENGTH`: 최대 시퀀스 길이 (default: `512`)
+
+## 라이선스
+
+[Apache License 2.0](LICENSE)
+
+Copyright 2026 **제타포랩(zeta4lab)**
+
+- 대표: 최강유
+- https://zeta4.net
+
+자세한 저작권 및 고지 사항은 [NOTICE](NOTICE)를 참고하세요.
